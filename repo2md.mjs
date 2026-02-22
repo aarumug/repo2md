@@ -2,17 +2,18 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 function usage(exitCode = 0) {
   console.log(`
 Usage:
-  node flatten.mjs [output.md] [--encoding <enc>] [--max-tokens <n>] [--rev <rev>] [--no-tree]
+  node repo2md.mjs [output.md] [--encoding <enc>] [--max-tokens <n>] [--rev <rev>] [--no-tree]
 
 Examples:
-  node flatten.mjs flattened.md
-  node flatten.mjs flattened.md --encoding o200k_base
-  node flatten.mjs flattened.md --max-tokens 128000
-  node flatten.mjs flattened.md --rev HEAD
+  node repo2md.mjs flattened.md
+  node repo2md.mjs flattened.md --encoding o200k_base
+  node repo2md.mjs flattened.md --max-tokens 128000
+  node repo2md.mjs flattened.md --rev HEAD
 `);
   process.exit(exitCode);
 }
@@ -224,7 +225,27 @@ async function main() {
   console.error(`Wrote ${out} (${tokens} tokens, ${method}, ${args.encoding})`);
 }
 
-main().catch((e) => {
-  console.error(e?.stack || String(e));
-  process.exit(1);
-});
+export {
+  parseArgs,
+  splitNull,
+  listFilesWorkingTree,
+  listFilesAtRev,
+  readFileTextWorkingTree,
+  readFileBlobAtRev,
+  looksBinary,
+  chooseFence,
+  extToLang,
+  countTokens,
+  main,
+};
+
+const isDirectRun = process.argv[1]
+  ? path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+  : false;
+
+if (isDirectRun) {
+  main().catch((e) => {
+    console.error(e?.stack || String(e));
+    process.exit(1);
+  });
+}
