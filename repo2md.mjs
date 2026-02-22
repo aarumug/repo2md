@@ -7,13 +7,14 @@ import { fileURLToPath } from "node:url";
 function usage(exitCode = 0) {
   console.log(`
 Usage:
-  node repo2md.mjs [output.md] [--encoding <enc>] [--max-tokens <n>] [--rev <rev>] [--no-tree]
+  node repo2md.mjs [output.md] [--encoding <enc>] [--max-tokens <n>] [--rev <rev>] [--root <dir>] [--no-tree]
 
 Examples:
   node repo2md.mjs flattened.md
   node repo2md.mjs flattened.md --encoding o200k_base
   node repo2md.mjs flattened.md --max-tokens 128000
   node repo2md.mjs flattened.md --rev HEAD
+  node repo2md.mjs flattened.md --root src
 `);
   process.exit(exitCode);
 }
@@ -24,6 +25,7 @@ function parseArgs(argv) {
     encoding: process.env.ENCODING || "o200k_base",
     maxTokens: Number(process.env.MAX_TOKENS || "0"),
     rev: null,
+    root: ".",
     includeTree: true,
   };
 
@@ -34,6 +36,7 @@ function parseArgs(argv) {
     else if (a === "--encoding") args.encoding = rest[++i];
     else if (a === "--max-tokens") args.maxTokens = Number(rest[++i]);
     else if (a === "--rev") args.rev = rest[++i];
+    else if (a === "--root") args.root = rest[++i];
     else if (a === "--no-tree") args.includeTree = false;
     else if (!a.startsWith("-") && args.out === "flattened.md") args.out = a;
     else usage(2);
@@ -42,8 +45,30 @@ function parseArgs(argv) {
 }
 
 // Git helpers
-function gitBuffer(args) {
-  return execFileSync("git", args, { encoding: "buffer" });
+function gitBuffer(args, cwd) {
+  return execFileSync("git", args, { encoding: "buffer", cwd });
+}
+
+function gitString(args, cwd) {
+  return execFileSync("git", args, { encoding: "utf8", cwd }).trim();
+}
+
+function toPosixPath(p) {
+  return p.split(path.sep).join("/");
+}
+
+function getRepoRoot() {
+  return gitString(["rev-parse", "--show-toplevel"], process.cwd());
+}
+
+function toRepoPathspec(rootArg, repoRoot) {
+  const rootAbs = path.resolve(process.cwd(), rootArg || ".");
+  const rel = path.relative(repoRoot, rootAbs);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) {
+    throw new Error(`Root directory must be inside repository: ${rootArg}`);
+  }
+  if (!rel || rel === ".") return null;
+  return toPosixPath(rel);
 }
 function splitNull(buf) {
   // buf is a Buffer; split on NUL (0x00)
@@ -59,27 +84,31 @@ function splitNull(buf) {
   return parts.filter((p) => p.length > 0);
 }
 
-function listFilesWorkingTree() {
+function listFilesWorkingTree(repoRoot, rootPathspec) {
   // git ls-files -z outputs NUL-separated names [1](https://lunary.ai/openai-tokenizer)
-  const buf = gitBuffer(["ls-files", "-z"]);
+  const cmd = ["ls-files", "-z"];
+  if (rootPathspec) cmd.push("--", rootPathspec);
+  const buf = gitBuffer(cmd, repoRoot);
   return splitNull(buf);
 }
 
-function listFilesAtRev(rev) {
+function listFilesAtRev(repoRoot, rev, rootPathspec) {
   // NUL-separated list of files at a given tree-ish
-  const buf = gitBuffer(["ls-tree", "-r", "--name-only", "-z", rev]);
+  const cmd = ["ls-tree", "-r", "--name-only", "-z", rev];
+  if (rootPathspec) cmd.push("--", rootPathspec);
+  const buf = gitBuffer(cmd, repoRoot);
   return splitNull(buf);
 }
 
-function readFileTextWorkingTree(file) {
+function readFileTextWorkingTree(repoRoot, file) {
   // read as utf8 with replacement; no external deps
-  return fs.readFileSync(file, "utf8");
+  return fs.readFileSync(path.join(repoRoot, file), "utf8");
 }
 
-function readFileBlobAtRev(rev, file) {
+function readFileBlobAtRev(repoRoot, rev, file) {
   // Use git show to read file content at a revision
   // Return Buffer so we can do binary detection reliably
-  return gitBuffer(["show", `${rev}:${file}`]);
+  return gitBuffer(["show", `${rev}:${file}`], repoRoot);
 }
 
 // Binary detection (simple + effective): NUL byte in first chunk
@@ -147,9 +176,13 @@ async function countTokens(text, encodingName) {
 
 async function main() {
   const args = parseArgs(process.argv);
+  const repoRoot = getRepoRoot();
+  const rootPathspec = toRepoPathspec(args.root, repoRoot);
 
   // Collect file list
-  const files = args.rev ? listFilesAtRev(args.rev) : listFilesWorkingTree();
+  const files = args.rev
+    ? listFilesAtRev(repoRoot, args.rev, rootPathspec)
+    : listFilesWorkingTree(repoRoot, rootPathspec);
 
   const out = args.out;
   const ws = fs.createWriteStream(out, { encoding: "utf8" });
@@ -159,6 +192,7 @@ async function main() {
   write(`# Repository Flattened View\n\n`);
   write(`> Generated via \`git\` + Node.js\n`);
   write(`> Token encoding target: \`${args.encoding}\`\n`);
+  write(`> Root: \`${rootPathspec || "."}\`\n`);
   if (args.rev) write(`> Revision: \`${args.rev}\`\n`);
   write(`\n`);
 
@@ -174,14 +208,15 @@ async function main() {
     let isBin = false;
 
     if (args.rev) {
-      const blob = readFileBlobAtRev(args.rev, f);
+      const blob = readFileBlobAtRev(repoRoot, args.rev, f);
       isBin = looksBinary(blob);
       if (!isBin) contentText = blob.toString("utf8");
     } else {
       // working tree
       // If file vanished, skip
-      if (!fs.existsSync(f)) continue;
-      const txt = readFileTextWorkingTree(f);
+      const fullPath = path.join(repoRoot, f);
+      if (!fs.existsSync(fullPath)) continue;
+      const txt = readFileTextWorkingTree(repoRoot, f);
       isBin = looksBinary(txt);
       if (!isBin) contentText = txt;
     }
