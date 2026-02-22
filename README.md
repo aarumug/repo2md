@@ -1,23 +1,29 @@
-# repo2md (v0.1)
+# repo2md (v0.2.0)
 
 A small Node.js CLI that flattens a Git repository into a single Markdown file.
 
 It writes each tracked text file into one output document, with optional repository tree listing and token count summary.
 
-## Quick Start (PowerShell)
+## Quick Start
 
-```powershell
+```bash
 # 1) From the repository root
-Set-Location "<path-to-repo2md>"
+cd <path-to-repo2md>
 
-# 2) Create a flattened file with tree section
-node .\repo2md.mjs .\flattened.md
+# 2) Create a flattened file (defaults to repo2md_flattened.md)
+node repo2md.mjs
 
-# 3) Create a smaller flattened file without tree section
-node .\repo2md.mjs .\flattened-no-tree.md --no-tree
+# 3) Create a flattened file with a custom name
+node repo2md.mjs flattened.md
 
-# 4) Flatten a specific revision
-node .\repo2md.mjs .\flattened-head.md --rev HEAD --no-tree
+# 4) Create a smaller flattened file without tree section
+node repo2md.mjs flattened-no-tree.md --no-tree
+
+# 5) Flatten a specific revision
+node repo2md.mjs flattened-head.md --rev HEAD --no-tree
+
+# 6) Flatten only the src directory
+node repo2md.mjs --root src
 ```
 
 ## Requirements
@@ -29,26 +35,30 @@ node .\repo2md.mjs .\flattened-head.md --rev HEAD --no-tree
 ## Usage
 
 ```bash
-node repo2md.mjs [output.md] [--encoding <enc>] [--max-tokens <n>] [--rev <rev>] [--no-tree]
+node repo2md.mjs [output.md] [--encoding <enc>] [--max-tokens <n>] [--rev <rev>] [--root <dir>] [--no-tree]
+                 [--include <pattern>] [--exclude <pattern>]
 node repo2md.mjs --help
 ```
 
 ## Examples
 
 ```bash
-node repo2md.mjs
-node repo2md.mjs flattened.md
-node repo2md.mjs flattened.md --encoding o200k_base
-node repo2md.mjs flattened.md --max-tokens 128000
-node repo2md.mjs flattened.md --rev HEAD
-node repo2md.mjs flattened.md --no-tree
+node repo2md.mjs                                          # Creates <reponame>_flattened.md
+node repo2md.mjs custom.md                                 # Creates custom.md
+node repo2md.mjs --encoding o200k_base                     # Specific token encoding
+node repo2md.mjs --max-tokens 128000                       # With token limit
+node repo2md.mjs --rev HEAD                                # Flatten at specific revision
+node repo2md.mjs --root src                                # Flatten only the src directory
+node repo2md.mjs --include '**/*.js' --include '**/*.ts'   # Only JS/TS files
+node repo2md.mjs --exclude 'tests/**' --exclude '*.md'     # Exclude tests and markdown
+node repo2md.mjs --no-tree                                 # Skip repository tree section
 ```
 
 ## Options
 
 - `output.md`
   - Optional output file path.
-  - Default: `flattened.md`.
+  - Default: `<reponame>_flattened.md`.
 - `--encoding <enc>`
   - Token encoding name used for token counting.
   - Default: `o200k_base` (or `ENCODING` env var).
@@ -59,8 +69,18 @@ node repo2md.mjs flattened.md --no-tree
 - `--rev <rev>`
   - Flatten files from a Git revision (for example `HEAD`, branch name, commit SHA).
   - If omitted, uses current working tree tracked files.
+- `--root <dir>`
+  - Flatten only a specific subdirectory of the repository.
+  - Default: `.` (entire repository).
 - `--no-tree`
   - Skip the `## Repository Tree` section at the top of the output.
+- `--include <pattern>`
+  - Glob pattern to include only matching files (repeatable).
+  - Supports `*`, `?`, `**`, `{a,b}`, `[abc]`.
+  - If not specified, all tracked files are included.
+- `--exclude <pattern>`
+  - Glob pattern to exclude matching files (repeatable).
+  - Supports the same glob syntax as `--include`.
 - `-h`, `--help`
   - Print usage and examples.
 
@@ -90,6 +110,8 @@ node --test tests/*.test.mjs
   - Revision mode: `git ls-tree -r --name-only -z <rev>`
 - Text files only:
   - Binary files are skipped (NUL-byte check on first 8 KB).
+  - Image files are always excluded (png, jpg, gif, svg, webp, etc.).
+- Filtered by `--include` / `--exclude` glob patterns when specified.
 
 ## Output Format
 

@@ -8,25 +8,35 @@ function usage(exitCode = 0) {
   console.log(`
 Usage:
   node repo2md.mjs [output.md] [--encoding <enc>] [--max-tokens <n>] [--rev <rev>] [--root <dir>] [--no-tree]
+                   [--include <pattern>] [--exclude <pattern>]
+
+  If output.md is not specified, defaults to <reponame>_flattened.md
+  If --root is not specified, flattens the current directory
+  --include and --exclude accept glob patterns (repeatable); images and binary files are always excluded
 
 Examples:
-  node repo2md.mjs flattened.md
-  node repo2md.mjs flattened.md --encoding o200k_base
-  node repo2md.mjs flattened.md --max-tokens 128000
-  node repo2md.mjs flattened.md --rev HEAD
-  node repo2md.mjs flattened.md --root src
+  node repo2md.mjs                                    # Creates repo2md_flattened.md
+  node repo2md.mjs custom.md                          # Creates custom.md
+  node repo2md.mjs --encoding o200k_base              # Creates repo2md_flattened.md with specific encoding
+  node repo2md.mjs --max-tokens 128000                # Creates repo2md_flattened.md with token limit
+  node repo2md.mjs --rev HEAD                         # Flattens at specific revision
+  node repo2md.mjs --root src                         # Flattens only the src directory
+  node repo2md.mjs --include '**/*.js' --include '**/*.ts'  # Only JS/TS files
+  node repo2md.mjs --exclude 'tests/**' --exclude '*.md'    # Exclude tests and markdown
 `);
   process.exit(exitCode);
 }
 
 function parseArgs(argv) {
   const args = {
-    out: "flattened.md",
+    out: null,
     encoding: process.env.ENCODING || "o200k_base",
     maxTokens: Number(process.env.MAX_TOKENS || "0"),
     rev: null,
     root: ".",
     includeTree: true,
+    include: [],
+    exclude: [],
   };
 
   const rest = argv.slice(2);
@@ -38,7 +48,9 @@ function parseArgs(argv) {
     else if (a === "--rev") args.rev = rest[++i];
     else if (a === "--root") args.root = rest[++i];
     else if (a === "--no-tree") args.includeTree = false;
-    else if (!a.startsWith("-") && args.out === "flattened.md") args.out = a;
+    else if (a === "--include") args.include.push(rest[++i]);
+    else if (a === "--exclude") args.exclude.push(rest[++i]);
+    else if (!a.startsWith("-") && args.out === null) args.out = a;
     else usage(2);
   }
   return args;
@@ -59,6 +71,10 @@ function toPosixPath(p) {
 
 function getRepoRoot() {
   return gitString(["rev-parse", "--show-toplevel"], process.cwd());
+}
+
+function getRepoName(repoRoot) {
+  return path.basename(repoRoot);
 }
 
 function toRepoPathspec(rootArg, repoRoot) {
@@ -146,6 +162,83 @@ function extToLang(filePath) {
   return ext || "text";
 }
 
+// Image extensions — always excluded regardless of include patterns
+const IMAGE_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "gif", "bmp", "ico", "webp",
+  "tiff", "tif", "avif", "heic", "heif", "svg",
+  "raw", "cr2", "nef", "psd", "eps", "exr",
+]);
+
+function isImageFile(filePath) {
+  const ext = path.extname(filePath).slice(1).toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext);
+}
+
+// Glob pattern matching without external dependencies.
+// Supports: * ? ** {a,b} [abc]
+// Patterns without '/' match against the basename; patterns with '/' match the full path.
+function globToRegexStr(pattern) {
+  let r = "";
+  let i = 0;
+  while (i < pattern.length) {
+    const c = pattern[i];
+    if (c === "*" && i + 1 < pattern.length && pattern[i + 1] === "*") {
+      i += 2;
+      if (i < pattern.length && pattern[i] === "/") {
+        i++; // consume the slash
+        r += "(?:[^/]+/)*"; // zero or more path segments (each ending with /)
+      } else {
+        r += ".*"; // ** at end — match everything
+      }
+    } else if (c === "*") {
+      r += "[^/]*";
+      i++;
+    } else if (c === "?") {
+      r += "[^/]";
+      i++;
+    } else if (c === "{") {
+      const end = pattern.indexOf("}", i + 1);
+      if (end === -1) {
+        r += "\\{";
+        i++;
+      } else {
+        const alts = pattern.slice(i + 1, end).split(",").map(globToRegexStr);
+        r += "(?:" + alts.join("|") + ")";
+        i = end + 1;
+      }
+    } else if (c === "[") {
+      // Pass character class through verbatim
+      let j = i + 1;
+      if (j < pattern.length && pattern[j] === "!") j++;
+      if (j < pattern.length && pattern[j] === "]") j++;
+      while (j < pattern.length && pattern[j] !== "]") j++;
+      r += pattern.slice(i, j + 1);
+      i = j + 1;
+    } else {
+      if (".+^$|()|\\".includes(c)) r += "\\";
+      r += c;
+      i++;
+    }
+  }
+  return r;
+}
+
+function matchesGlob(pattern, filePath) {
+  const fp = filePath.split(path.sep).join("/");
+  // Match against basename when pattern has no slash; full path otherwise
+  const hasSlash = pattern.includes("/");
+  const target = hasSlash ? fp : (fp.split("/").pop() || fp);
+  return new RegExp("^" + globToRegexStr(pattern) + "$").test(target);
+}
+
+// Returns true if the file should be included in the output
+function shouldInclude(file, include, exclude) {
+  if (isImageFile(file)) return false;
+  if (include.length > 0 && !include.some((p) => matchesGlob(p, file))) return false;
+  if (exclude.some((p) => matchesGlob(p, file))) return false;
+  return true;
+}
+
 // Optional token counting via JS tiktoken implementation
 async function countTokens(text, encodingName) {
   // OpenAI notes a community-supported @dbdq/tiktoken package for JS tokenization. [2](https://en.wikipedia.org/wiki/GNU_Core_Utilities)
@@ -176,13 +269,24 @@ async function countTokens(text, encodingName) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  const repoRoot = getRepoRoot();
+  // Find the git repo that owns the root directory (may differ from CWD's repo)
+  const rootAbs = path.resolve(process.cwd(), args.root || ".");
+  const repoRoot = gitString(["rev-parse", "--show-toplevel"], rootAbs);
   const rootPathspec = toRepoPathspec(args.root, repoRoot);
 
+  // Set default output filename based on repo name if not provided
+  if (!args.out) {
+    const repoName = getRepoName(repoRoot);
+    args.out = `${repoName}_flattened.md`;
+  }
+
   // Collect file list
-  const files = args.rev
+  const allFiles = args.rev
     ? listFilesAtRev(repoRoot, args.rev, rootPathspec)
     : listFilesWorkingTree(repoRoot, rootPathspec);
+
+  // Apply include/exclude patterns; images and binaries are always excluded
+  const files = allFiles.filter((f) => shouldInclude(f, args.include, args.exclude));
 
   const out = args.out;
   const ws = fs.createWriteStream(out, { encoding: "utf8" });
@@ -271,6 +375,12 @@ export {
   chooseFence,
   extToLang,
   countTokens,
+  getRepoRoot,
+  getRepoName,
+  isImageFile,
+  globToRegexStr,
+  matchesGlob,
+  shouldInclude,
   main,
 };
 

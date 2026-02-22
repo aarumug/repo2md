@@ -7,12 +7,15 @@ import {
   looksBinary,
   chooseFence,
   extToLang,
+  isImageFile,
+  matchesGlob,
+  shouldInclude,
 } from "../repo2md.mjs";
 
 test("parseArgs returns expected defaults", () => {
   const args = parseArgs(["node", "repo2md.mjs"]);
 
-  assert.equal(args.out, "flattened.md");
+  assert.equal(args.out, null); // default; actual filename is resolved in main()
   assert.equal(args.encoding, process.env.ENCODING || "o200k_base");
   assert.equal(args.maxTokens, Number(process.env.MAX_TOKENS || "0"));
   assert.equal(args.rev, null);
@@ -60,4 +63,74 @@ test("chooseFence grows past max backtick run", () => {
 test("extToLang maps extension or falls back to text", () => {
   assert.equal(extToLang("src/index.js"), "js");
   assert.equal(extToLang("README"), "text");
+});
+
+test("parseArgs parses --include and --exclude flags", () => {
+  const args = parseArgs([
+    "node", "repo2md.mjs",
+    "--include", "**/*.js",
+    "--include", "**/*.ts",
+    "--exclude", "tests/**",
+  ]);
+  assert.deepEqual(args.include, ["**/*.js", "**/*.ts"]);
+  assert.deepEqual(args.exclude, ["tests/**"]);
+});
+
+test("parseArgs defaults include/exclude to empty arrays", () => {
+  const args = parseArgs(["node", "repo2md.mjs"]);
+  assert.deepEqual(args.include, []);
+  assert.deepEqual(args.exclude, []);
+});
+
+test("isImageFile detects common image extensions", () => {
+  assert.equal(isImageFile("photo.png"), true);
+  assert.equal(isImageFile("photo.PNG"), true);
+  assert.equal(isImageFile("icon.svg"), true);
+  assert.equal(isImageFile("img/hero.webp"), true);
+  assert.equal(isImageFile("src/index.js"), false);
+  assert.equal(isImageFile("README.md"), false);
+});
+
+test("matchesGlob: * matches within path segment", () => {
+  assert.equal(matchesGlob("*.js", "index.js"), true);
+  assert.equal(matchesGlob("*.js", "src/index.js"), true);   // basename match
+  assert.equal(matchesGlob("*.js", "index.ts"), false);
+});
+
+test("matchesGlob: ** matches across path segments", () => {
+  assert.equal(matchesGlob("**/*.js", "index.js"), true);
+  assert.equal(matchesGlob("**/*.js", "src/index.js"), true);
+  assert.equal(matchesGlob("**/*.js", "src/util/index.js"), true);
+  assert.equal(matchesGlob("**/*.js", "src/index.ts"), false);
+});
+
+test("matchesGlob: directory prefix pattern", () => {
+  assert.equal(matchesGlob("src/**", "src/index.js"), true);
+  assert.equal(matchesGlob("src/**", "src/util/index.js"), true);
+  assert.equal(matchesGlob("src/**", "lib/index.js"), false);
+});
+
+test("matchesGlob: {a,b} alternation", () => {
+  assert.equal(matchesGlob("*.{js,ts}", "index.js"), true);
+  assert.equal(matchesGlob("*.{js,ts}", "index.ts"), true);
+  assert.equal(matchesGlob("*.{js,ts}", "index.py"), false);
+});
+
+test("shouldInclude: images always excluded", () => {
+  assert.equal(shouldInclude("assets/logo.png", [], []), false);
+  assert.equal(shouldInclude("src/index.js", [], []), true);
+});
+
+test("shouldInclude: include patterns filter files", () => {
+  assert.equal(shouldInclude("src/index.js", ["**/*.js"], []), true);
+  assert.equal(shouldInclude("src/index.ts", ["**/*.js"], []), false);
+});
+
+test("shouldInclude: exclude patterns remove files", () => {
+  assert.equal(shouldInclude("tests/foo.test.js", [], ["tests/**"]), false);
+  assert.equal(shouldInclude("src/index.js", [], ["tests/**"]), true);
+});
+
+test("shouldInclude: exclude takes precedence over include", () => {
+  assert.equal(shouldInclude("src/index.js", ["**/*.js"], ["src/**"]), false);
 });
