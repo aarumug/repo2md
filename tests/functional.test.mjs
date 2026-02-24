@@ -30,6 +30,15 @@ function setupTempRepo() {
   return dir;
 }
 
+function setupTempDir() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "repo2md-nongit-"));
+  fs.mkdirSync(path.join(dir, "src"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "src", "index.js"), "export const y = 2;\n", "utf8");
+  fs.writeFileSync(path.join(dir, "README.md"), "# Non Git Folder\n", "utf8");
+  fs.writeFileSync(path.join(dir, "bin.dat"), Buffer.from([0x00, 0x01, 0x02]));
+  return dir;
+}
+
 test("CLI writes flattened output and skips binary/untracked files", () => {
   const cwd = setupTempRepo();
   const out = "flat.md";
@@ -57,4 +66,31 @@ test("CLI respects --no-tree and --rev", () => {
   assert.doesNotMatch(text, /## Repository Tree/);
   assert.match(text, /> Revision: `HEAD`/);
   assert.match(text, /## `src\/index\.js`/);
+});
+
+test("CLI flattens non-git directories from --root", () => {
+  const root = setupTempDir();
+  const out = path.join(root, "flat.md");
+
+  run(process.execPath, [scriptPath, out, "--root", root], process.cwd());
+
+  const text = fs.readFileSync(out, "utf8");
+  assert.match(text, /## `src\/index\.js`/);
+  assert.match(text, /## `README\.md`/);
+  assert.doesNotMatch(text, /## `bin\.dat`/);
+});
+
+test("CLI rejects --rev for non-git --root", () => {
+  const root = setupTempDir();
+  const out = path.join(root, "flat.md");
+
+  let error = null;
+  try {
+    run(process.execPath, [scriptPath, out, "--root", root, "--rev", "HEAD"], process.cwd());
+  } catch (e) {
+    error = e;
+  }
+
+  assert.ok(error);
+  assert.match(String(error.stderr || error.message), /--rev requires --root to be inside a Git repository/);
 });

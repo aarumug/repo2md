@@ -12,6 +12,7 @@ Usage:
 
   If output.md is not specified, defaults to <reponame>_flattened.md
   If --root is not specified, flattens the current directory
+  If --root is outside a Git repository, it flattens filesystem files under that directory
   --include and --exclude accept glob patterns (repeatable); images and binary files are always excluded
 
 Examples:
@@ -73,6 +74,17 @@ function getRepoRoot() {
   return gitString(["rev-parse", "--show-toplevel"], process.cwd());
 }
 
+function tryGetRepoRoot(startDir) {
+  try {
+    return { isGitRepo: true, repoRoot: gitString(["rev-parse", "--show-toplevel"], startDir) };
+  } catch (e) {
+    const stderr = e?.stderr ? String(e.stderr) : "";
+    const isNotRepo = e?.status === 128 && /not a git repository/i.test(stderr);
+    if (isNotRepo) return { isGitRepo: false, repoRoot: null };
+    throw e;
+  }
+}
+
 function getRepoName(repoRoot) {
   return path.basename(repoRoot);
 }
@@ -114,6 +126,29 @@ function listFilesAtRev(repoRoot, rev, rootPathspec) {
   if (rootPathspec) cmd.push("--", rootPathspec);
   const buf = gitBuffer(cmd, repoRoot);
   return splitNull(buf);
+}
+
+function listFilesFromDirectory(rootDir) {
+  const files = [];
+
+  function walk(currentAbs, currentRel = "") {
+    const entries = fs
+      .readdirSync(currentAbs, { withFileTypes: true })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
+      const nextAbs = path.join(currentAbs, entry.name);
+      const nextRel = currentRel ? path.join(currentRel, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        walk(nextAbs, nextRel);
+      } else if (entry.isFile()) {
+        files.push(toPosixPath(nextRel));
+      }
+    }
+  }
+
+  walk(rootDir);
+  return files;
 }
 
 function readFileTextWorkingTree(repoRoot, file) {
@@ -269,21 +304,34 @@ async function countTokens(text, encodingName) {
 
 async function main() {
   const args = parseArgs(process.argv);
-  // Find the git repo that owns the root directory (may differ from CWD's repo)
   const rootAbs = path.resolve(process.cwd(), args.root || ".");
-  const repoRoot = gitString(["rev-parse", "--show-toplevel"], rootAbs);
-  const rootPathspec = toRepoPathspec(args.root, repoRoot);
+  if (!fs.existsSync(rootAbs) || !fs.statSync(rootAbs).isDirectory()) {
+    throw new Error(`Root directory does not exist or is not a directory: ${args.root}`);
+  }
+
+  // Prefer Git-aware mode when root is inside a repository; otherwise flatten plain filesystem content.
+  const { isGitRepo, repoRoot } = tryGetRepoRoot(rootAbs);
+  if (args.rev && !isGitRepo) {
+    throw new Error(`--rev requires --root to be inside a Git repository: ${args.root}`);
+  }
+  const rootPathspec = isGitRepo ? toRepoPathspec(args.root, repoRoot) : null;
+  const rootLabel = isGitRepo
+    ? (rootPathspec || ".")
+    : (toPosixPath(path.relative(process.cwd(), rootAbs)) || ".");
 
   // Set default output filename based on repo name if not provided
   if (!args.out) {
-    const repoName = getRepoName(repoRoot);
-    args.out = `${repoName}_flattened.md`;
+    const sourceName = isGitRepo ? getRepoName(repoRoot) : (path.basename(rootAbs) || "flattened");
+    args.out = `${sourceName}_flattened.md`;
   }
 
   // Collect file list
-  const allFiles = args.rev
-    ? listFilesAtRev(repoRoot, args.rev, rootPathspec)
-    : listFilesWorkingTree(repoRoot, rootPathspec);
+  const allFiles = isGitRepo
+    ? (args.rev
+      ? listFilesAtRev(repoRoot, args.rev, rootPathspec)
+      : listFilesWorkingTree(repoRoot, rootPathspec))
+    : listFilesFromDirectory(rootAbs);
+  const sourceBaseDir = isGitRepo ? repoRoot : rootAbs;
 
   // Apply include/exclude patterns; images and binaries are always excluded
   const files = allFiles.filter((f) => shouldInclude(f, args.include, args.exclude));
@@ -294,9 +342,9 @@ async function main() {
   const write = (s) => ws.write(s);
 
   write(`# Repository Flattened View\n\n`);
-  write(`> Generated via \`git\` + Node.js\n`);
+  write(`> Generated via Node.js (Git-aware when available)\n`);
   write(`> Token encoding target: \`${args.encoding}\`\n`);
-  write(`> Root: \`${rootPathspec || "."}\`\n`);
+  write(`> Root: \`${rootLabel}\`\n`);
   if (args.rev) write(`> Revision: \`${args.rev}\`\n`);
   write(`\n`);
 
@@ -318,9 +366,9 @@ async function main() {
     } else {
       // working tree
       // If file vanished, skip
-      const fullPath = path.join(repoRoot, f);
+      const fullPath = path.join(sourceBaseDir, f);
       if (!fs.existsSync(fullPath)) continue;
-      const txt = readFileTextWorkingTree(repoRoot, f);
+      const txt = readFileTextWorkingTree(sourceBaseDir, f);
       isBin = looksBinary(txt);
       if (!isBin) contentText = txt;
     }

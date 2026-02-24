@@ -29,8 +29,7 @@ node repo2md.mjs --root src
 ## Requirements
 
 - Node.js 18+
-- Git installed and available on PATH
-- Run inside a Git repository
+- Git installed and available on PATH (only required for Git-based mode and `--rev`)
 
 ## Usage
 
@@ -68,9 +67,11 @@ node repo2md.mjs --no-tree                                 # Skip repository tre
   - Default: `0` (disabled) (or `MAX_TOKENS` env var).
 - `--rev <rev>`
   - Flatten files from a Git revision (for example `HEAD`, branch name, commit SHA).
+  - Requires `--root` to be inside a Git repository.
   - If omitted, uses current working tree tracked files.
 - `--root <dir>`
   - Flatten only a specific subdirectory of the repository.
+  - If `--root` is outside Git, flattens all files under that directory from the filesystem.
   - Default: `.` (entire repository).
 - `--no-tree`
   - Skip the `## Repository Tree` section at the top of the output.
@@ -105,9 +106,11 @@ node --test tests/*.test.mjs
 
 ## What Gets Included
 
-- Tracked files from Git:
+- Git mode (when `--root` is inside a repository):
   - Working tree mode: `git ls-files -z`
   - Revision mode: `git ls-tree -r --name-only -z <rev>`
+- Filesystem fallback mode (when `--root` is outside Git):
+  - Recursively walks files under `--root`
 - Text files only:
   - Binary files are skipped (NUL-byte check on first 8 KB).
   - Image files are always excluded (png, jpg, gif, svg, webp, etc.).
